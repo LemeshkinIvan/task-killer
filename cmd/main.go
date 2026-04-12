@@ -1,80 +1,85 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"task-killer/internal"
+
+	"task-killer/internal/cfg"
+	"task-killer/internal/constants"
+	"task-killer/internal/log"
+	w "task-killer/internal/watcher"
 	"time"
 )
 
 const (
-	path               = "../cfg/cfg.json"
-	devPath            = "../cfg/cfg.json"
+	path    = "../cfg/cfg.json"
+	devPath = "../cfg/cfg.json"
+
 	defaultTimeIdle    = 10 * time.Second // сколько ждать если getConfig дал ошибку
-	defaultTimeRequest = 30 * time.Second // при истечении пойдет за файлом
+	defaultTimeRequest = 2 * time.Second  // при истечении пойдет за файлом
+
+	// switch true if you need stdout log
+	isDebug        = false
+	enableWriteLog = false
 )
 
-// flow
-// программа по вшитому пути спрашивает cfg.json. парсит в структуру
-// если getConfig вернула nil вместо структуры, то программа отлогирует ошибку
-// и после небольшого таймаута пойдет в следующую итерацию цикла, чтобы таки запросить cfg
-// если json валиден, то после идет валидация полей структуры.
-// если что-то отваливается, к примеру, timeout'ы, то ставим default
-
 func main() {
-	//go internal.LogInFile("app.log")
+	logger, err := log.NewLogger(log.LoggerCfg{
+		IsDebug:        isDebug,
+		EnableWriteLog: enableWriteLog,
+	})
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
+	}
 
-	internal.LogStdOut("start program")
+	logger.Log(constants.StartProgram, log.INFO)
 
 	for {
-		var cfg *internal.ConfigDTO
+		var config *cfg.ConfigDTO
 		var err error
 
-		internal.LogStdOut("start getConfig")
-		for cfg == nil {
-			cfg, err = internal.GetConfig(devPath)
+		logger.Log(constants.GetConfig, log.INFO)
+		for config == nil {
+			config, err = cfg.GetConfig(devPath)
+
 			if err != nil {
-				internal.LogStdOut(err.Error())
+				logger.Log(err.Error(), log.WARN)
 			}
 
 			time.Sleep(defaultTimeRequest)
 		}
 
-		internal.LogStdOut("yep, i get it!")
+		logger.Log(constants.ConfigIsLoaded, log.INFO)
 
-		// ставим время сна цикла
-		sleepDur, err := time.ParseDuration(cfg.TimeIdle)
+		sleepDur, err := time.ParseDuration(config.TimeSleep)
 		if err != nil {
 			sleepDur = defaultTimeIdle
-			internal.LogStdOut(err.Error())
-			internal.LogStdOut("set default time idle")
+			logger.Log(err.Error(), log.WARN)
+			logger.Log(constants.SetDefaultSleepTime, log.WARN)
 		}
 
-		if err := initLog(); err != nil {
-			internal.LogStdOut(err.Error())
+		watcher, err := w.NewWin32Watcher(w.WatcherInit{
+			Log:       logger,
+			IsDebug:   isDebug,
+			Blacklist: config.Blacklist,
+		})
+		if err != nil {
+			logger.Log(err.Error(), log.FATAL)
 			os.Exit(-1)
 		}
 
-		if err := internal.StartWatcherWin32(cfg); err != nil {
-			internal.LogStdOut(err.Error())
-			os.Exit(-1)
+		if err := watcher.StartWatcherWin32(); err != nil {
+			if errors.Is(err, w.ErrBlacklistLen) {
+				logger.Log(err.Error(), log.WARN)
+			} else {
+				logger.Log(err.Error(), log.FATAL)
+				os.Exit(-1)
+			}
 		}
 
-		internal.LogStdOut(fmt.Sprintf("okey, start sleeping. Dur: %s", cfg.TimeIdle))
+		logger.Log(constants.GetSleepingMsg(config.TimeSleep), log.INFO)
 		time.Sleep(sleepDur)
 	}
-}
-
-func initLog() error {
-	if err := internal.CreateLogFolder(""); err != nil {
-		internal.LogStdOut("i cant create log folder. please fix it. Bye")
-		return fmt.Errorf(err.Error())
-	}
-
-	if err := internal.CreateLogFile(); err != nil {
-		internal.LogStdOut("i cant create log file. please fix it. Bye")
-		return fmt.Errorf(err.Error())
-	}
-
-	return nil
 }
