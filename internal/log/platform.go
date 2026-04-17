@@ -1,18 +1,23 @@
 package log
 
 import (
+	"fmt"
+	"os"
 	"runtime"
 )
 
 func setDefPath() (string, error) {
+	var winDefaultPath = "C:\\Users\\%s\\AppData\\Local\\blacklist\\logs"
+	var linuxDefaultPath = ""
+
 	if runtime.GOOS == "windows" {
-		return winDefaultPath, nil
+		var name = os.Getenv("USERNAME")
+		return fmt.Sprintf(winDefaultPath, name), nil
 	}
 
-	// if runtime.GOOS == "linux" {
-
-	// }
+	// later
+	if runtime.GOOS == "linux" {
+		return linuxDefaultPath, nil
+	}
 	return "", ErrUnknownPlatform
 }
-
-var winDefaultPath = "C:\\Users\\%s\\AppData\\Local\\blacklist\\logs"

@@ -23,6 +23,13 @@ const RED Color = "\033[31m"
 
 const Close string = "\033[0m"
 
+// terrible
+var headers map[LogLevel]string = map[LogLevel]string{
+	INFO:  string(BLUE) + string(INFO) + Close,
+	WARN:  string(YELLOW) + string(WARN) + Close,
+	FATAL: string(RED) + string(FATAL) + Close,
+}
+
 type Logger struct {
 	timeMask       string
 	LogFolder      string
@@ -54,7 +61,6 @@ func NewLogger(cfg LoggerCfg) (*Logger, error) {
 	}
 
 	if cfg.EnableWriteLog {
-		// create folder and open file
 		if cfg.LogFolder == "" {
 			path, err := setDefPath()
 			if err != nil {
@@ -66,22 +72,33 @@ func NewLogger(cfg LoggerCfg) (*Logger, error) {
 
 		l.LogFolder = cfg.LogFolder
 
-		err := l.InitLogFolder()
+		err := l.initLogFolder()
 		if err != nil {
 			return nil, err
 		}
 
+		path := l.LogFolder + "\\" + l.NameFile
+
+		if cfg.IsDebug {
+			l.writeToStdOut(path, string(INFO))
+		}
+
 		l.Writer = &lumberjack.Logger{
-			Filename:   l.LogFolder + "\\" + l.NameFile,
+			Filename:   path,
 			MaxSize:    10, // MB
 			MaxBackups: 5,
 			MaxAge:     7,    // дней
 			Compress:   true, // gzip
 		}
-	}
 
-	l.Ch = make(chan string, 100)
-	l.listen()
+		l.Ch = make(chan string, 100)
+
+		if cfg.EnableWriteLog && l.Writer == nil {
+			return nil, fmt.Errorf("logger writer is nil")
+		}
+
+		go l.listen()
+	}
 
 	return l, nil
 }
@@ -94,7 +111,7 @@ func (l *Logger) listen() {
 
 		_, err := l.Writer.Write([]byte(msg + "\n"))
 		if err != nil {
-			l.WriteToStdOut(err.Error(), string(WARN))
+			l.writeToStdOut(err.Error(), string(WARN))
 		}
 	}
 }
@@ -105,17 +122,13 @@ func (l *Logger) Close() {
 	}
 }
 
-func (l *Logger) InitLogFolder() error {
-	var path string
-	var name = os.Getenv("USERNAME")
-
-	// create folder
+func (l *Logger) initLogFolder() error {
 	if len(l.LogFolder) == 0 {
-		path = fmt.Sprintf(l.LogFolder, name)
+		return fmt.Errorf("cant create log folder: path is empty")
 	}
 
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, 0755); err != nil {
+	if _, err := os.Stat(l.LogFolder); os.IsNotExist(err) {
+		if err := os.MkdirAll(l.LogFolder, 0755); err != nil {
 			return err
 		}
 	}
@@ -128,33 +141,27 @@ func (l *Logger) Log(msg string, level LogLevel) {
 		level = INFO
 	}
 
-	var header string
-	switch level {
-	case INFO:
-		header = string(BLUE) + string(INFO) + Close
-	case WARN:
-		header = string(YELLOW) + string(WARN) + Close
-	case FATAL:
-		header = string(RED) + string(FATAL) + Close
-	default:
-		header = string(BLUE) + string(INFO) + Close
+	header, ok := headers[level]
+	if !ok {
+		header = headers[INFO]
 	}
 
 	if l.IsDebug {
-		l.WriteToStdOut(msg, header)
+		l.writeToStdOut(msg, header)
 	}
 
-	if l.EnableWriteLog {
-		select {
-		case l.Ch <- l.formatMsg(msg, header):
-		default:
-			// канал переполнен — не блокируемся
-			l.WriteToStdOut("log channel overflow", string(YELLOW)+string(WARN)+Close)
-		}
+	if !l.EnableWriteLog || l.Ch == nil {
+		return
+	}
+
+	select {
+	case l.Ch <- string(level) + " " + msg:
+	default:
+		l.writeToStdOut("log dropped (channel full)", string(WARN))
 	}
 }
 
-func (l *Logger) WriteToStdOut(msg string, header string) {
+func (l *Logger) writeToStdOut(msg string, header string) {
 	fmt.Println(l.formatMsg(msg, header))
 }
 

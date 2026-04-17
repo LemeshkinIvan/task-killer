@@ -1,29 +1,38 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 
+	"task-killer/internal/cli"
 	cfg "task-killer/internal/config"
-	providers "task-killer/internal/config_providers"
-	"task-killer/internal/constants"
 	"task-killer/internal/log"
-	w "task-killer/internal/watcher"
-	"time"
+	p "task-killer/internal/provider"
+	"task-killer/internal/service"
+	"task-killer/internal/watcher/win"
 )
 
-const (
-	defaultTimeIdle    = 10 * time.Second // сколько ждать при завершении интерации watcher
-	defaultTimeRequest = 2 * time.Second  // при истечении пойдет за файлом
-)
+const exitFailure = -1
 
 func main() {
-	// init
-	args, err := getCMDFlags()
+	agent, err := initAgent()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
+		fmt.Println(err.Error())
+		os.Exit(exitFailure)
+	}
+
+	defer agent.Shutdown()
+
+	if err := agent.Run(); err != nil {
+		fmt.Println(err.Error())
+		os.Exit(exitFailure)
+	}
+}
+
+func initAgent() (*service.AgentService, error) {
+	args, err := cli.GetCMDFlags()
+	if err != nil {
+		return nil, err
 	}
 
 	logger, err := log.NewLogger(log.LoggerCfg{
@@ -31,75 +40,57 @@ func main() {
 		EnableWriteLog: args.EnableLogFile,
 	})
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
+		return nil, err
 	}
 
-	// close goroutine
-	if args.EnableLogFile {
-		defer logger.Close()
-	}
-
-	logger.Log(constants.StartProgram, log.INFO)
-
-	var watcher *w.Win32Watcher
-	var config *cfg.ConfigDTO
-
-	smb, err := providers.NewSMBManager(providers.SMBInput{
-		Addr: args.HostAddress,
-	})
+	configManager, err := initConfigManager(args)
 	if err != nil {
-		logger.Log(err.Error(), log.FATAL)
-		os.Exit(-1)
+		return nil, err
 	}
 
-	var confManager *cfg.ConfigManager = &cfg.ConfigManager{
-		SMBClient: smb,
-	}
-
-	watcher, err = w.NewWin32Watcher(w.WatcherInit{
+	watcher, err := win.NewWin32Watcher(win.WatcherInit{
 		Log:     logger,
-		IsDebug: args.IsDebug,
+		IsDebug: false,
 	})
 	if err != nil {
-		logger.Log(err.Error(), log.FATAL)
-		os.Exit(-1)
+		return nil, err
 	}
 
-	// start
-	for {
-		logger.Log(constants.GetConfig, log.INFO)
-
-		// лезем за конфигом
-		for config == nil {
-			config, err = confManager.GetConfigWithSMB(args.ConfigPath)
-
-			if err != nil {
-				logger.Log(err.Error(), log.WARN)
-			}
-
-			time.Sleep(defaultTimeRequest)
-		}
-
-		logger.Log(constants.ConfigIsLoaded, log.INFO)
-
-		sleepDur, err := time.ParseDuration(config.TimeSleep)
-		if err != nil {
-			sleepDur = defaultTimeIdle
-			logger.Log(err.Error(), log.WARN)
-			logger.Log(constants.SetDefaultSleepTime, log.WARN)
-		}
-
-		if err := watcher.StartWatcherWin32(config.Blacklist); err != nil {
-			if errors.Is(err, w.ErrBlacklistLen) {
-				logger.Log(err.Error(), log.WARN)
-			} else {
-				logger.Log(err.Error(), log.FATAL)
-				os.Exit(-1)
-			}
-		}
-
-		logger.Log(constants.GetSleepingMsg(config.TimeSleep), log.INFO)
-		time.Sleep(sleepDur)
+	service, err := service.NewAgentService(args, configManager, logger, watcher)
+	if err != nil {
+		return nil, err
 	}
+
+	return service, nil
+}
+
+func initConfigManager(args *cli.CMDFlags) (*cfg.ConfigManager, error) {
+	if args == nil {
+		return nil, fmt.Errorf("args is nil")
+	}
+
+	var provider p.Provider
+	var err error
+
+	switch args.Conn {
+	case cli.Local:
+		provider, err = p.NewLocalProvider(args.Path)
+	case cli.SMB:
+		provider, err = p.NewSMBManager(p.SMBInput{
+			Addr:     args.Path,
+			User:     "",
+			Password: "",
+			Domain:   "",
+		})
+	case cli.HTTP:
+		provider, err = p.NewHTTPProvider(args.Path)
+	default:
+		return nil, fmt.Errorf("unknown provider type")
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return cfg.NewConfigManager(provider), nil
 }
